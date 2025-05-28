@@ -1,13 +1,23 @@
 # Define a method to extract collection data for a specific tenant
-def extract_collection_data(tenant_name)
-  puts "Extracting collection data for tenant: #{tenant_name}"
+def extract_collection_data(tenant_cname)
+  # Find the tenant by cname
+  tenant = Account.find_by(cname: tenant_cname)
+
+  if tenant.nil?
+    puts "Error: No tenant found with cname: #{tenant_cname}"
+    return
+  end
+
+  tenant_name = tenant.tenant # Get the actual tenant name from the account
+
+  puts "Extracting collection data for tenant: #{tenant_name} (cname: #{tenant_cname})"
 
   begin
-    # Switch to the tenant's schema
+    # Switch to the tenant's schema using the actual tenant name
     Apartment::Tenant.switch!(tenant_name)
 
     # Open a file to write the extracted collection data
-    File.open("#{tenant_name}_collections_data.json", 'w') do |file|
+    File.open("#{tenant_cname}_collections_data.json", 'w') do |file|
       # Write the opening bracket of a JSON array
       file.puts "["
 
@@ -57,11 +67,11 @@ if ARGV.length != 1
   exit 1
 end
 
-tenant_name = ARGV[0] # Get the tenant cname from command-line arguments
+tenant_cname = ARGV[0] # Get the tenant cname from command-line arguments
 
-puts "Starting collection data extraction for tenant: #{tenant_name}"
+puts "Starting collection data extraction for tenant cname: #{tenant_cname}"
 
-extract_collection_data(tenant_name)
+extract_collection_data(tenant_cname)
 
-puts "Completed collection data extraction for tenant: #{tenant_name}"
+puts "Completed collection data extraction for tenant cname: #{tenant_cname}"
 puts "==============================================="
