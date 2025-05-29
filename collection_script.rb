@@ -28,6 +28,14 @@ def extract_collection_data(tenant_cname)
         # Extract collection metadata and associated works
         collection_data = collection.attributes
 
+        # Replace access_control_id with the full access control record
+        if collection_data['access_control_id'].present?
+          access_control = Hydra::AccessControl.find(collection_data['access_control_id'])
+          collection_data[:access_control] = access_control.attributes
+          collection_data[:access_control][:permissions] = access_control.permissions.map(&:attributes)
+          collection_data.delete('access_control_id') # Remove the ID since we now have the full record
+        end
+
         # Fetch collection logo local path from CollectionBrandingInfo
         logo_info = CollectionBrandingInfo.find_by(
           collection_id: collection.id,
