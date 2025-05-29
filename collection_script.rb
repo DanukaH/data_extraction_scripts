@@ -28,6 +28,13 @@ def extract_collection_data(tenant_cname)
         # Extract collection metadata and associated works
         collection_data = collection.attributes
 
+        # Fetch collection logo local path from CollectionBrandingInfo
+        logo_info = CollectionBrandingInfo.find_by(
+          collection_id: collection.id,
+          role: 'logo'
+        )
+        collection_data[:collection_logo_local_path] = logo_info&.local_path
+
         # If the collection includes associated works (e.g., members), retrieve them
         works_data = collection.members.map do |work|
           work.attributes.merge(
