@@ -24,12 +24,26 @@ def extract_work_metadata_and_files(tenant_name, work_types)
           model_class.find_each do |work|
             # Extract metadata and attached files for the work
             work_data = work.attributes.merge(
-              files: work.file_sets.map do |file_set|
-                file_set.attributes.merge(
-                  original_file_metadata: file_set.original_file.attributes.except('id', 'created_at', 'updated_at')
-                )
-              end
+              visibility: work.visibility,
+              embargo: work.try(:embargo)&.attributes, # Fetch embargo details if available
+              lease: work.try(:lease)&.attributes,     # Fetch lease details if available
+              admin: work.try(:admin_set)&.attributes, # Fetch admin set if available
+              workflow_status: work.try(:to_sipity_entity)&.workflow_state_name, # Include workflow status
+              collections: work.members.select { |member| member.is_a?(Collection) }.map(&:attributes) # Fetch collections
             )
+
+            # Extract file metadata, including missing fields
+            file_data_list = work.file_sets.map do |file_set|
+              file_set.attributes.merge(
+                visibility: file_set.visibility, # Add file visibility
+                embargo: file_set.try(:embargo)&.attributes, # Fetch embargo details for file
+                lease: file_set.try(:lease)&.attributes,     # Fetch lease details for file
+                original_file_metadata: file_set.original_file&.attributes&.except('id', 'created_at', 'updated_at') || {}
+              )
+            end
+
+            # Integrate file data into work data
+            work_data[:files] = file_data_list unless file_data_list.empty?
             work_data_list << work_data
           end
 
@@ -56,6 +70,7 @@ def extract_work_metadata_and_files(tenant_name, work_types)
     end
 
     puts "Finished extracting data for tenant: #{tenant_name}"
+
   rescue StandardError => e
     # Log any unexpected errors for the tenant
     puts "Error processing tenant #{tenant_name}: #{e.message}"
