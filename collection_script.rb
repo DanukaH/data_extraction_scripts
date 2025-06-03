@@ -28,6 +28,9 @@ def extract_collection_data(tenant_cname)
         # Extract collection metadata and associated works
         collection_data = collection.attributes
 
+        # Add visibility
+        collection_data[:visibility] = collection.visibility
+
         # Replace access_control_id with the full access control record
         if collection_data['access_control_id'].present?
           access_control = Hydra::AccessControl.find(collection_data['access_control_id'])
