@@ -1,13 +1,22 @@
 # Define a method to extract work metadata and files for a specific tenant
-def extract_work_metadata_and_files(tenant_name, work_types)
-  puts "Extracting work metadata and files for tenant: #{tenant_name}"
+def extract_work_metadata_and_files(tenant_cname, work_types)
+  # Find the tenant by cname
+  tenant = Account.find_by(cname: tenant_cname)
+
+  if tenant.nil?
+    puts "Error: No tenant found with cname: #{tenant_cname}"
+    return
+  end
+
+  tenant_name = tenant.tenant # Get the actual tenant name from the account
+  puts "Extracting work metadata and files for tenant: #{tenant_cname} (tenant: #{tenant_name})"
 
   begin
-    # Switch to the tenant's schema
+    # Switch to the tenant's schema using the actual tenant name
     Apartment::Tenant.switch!(tenant_name)
 
     # Open a file to write the extracted information for the entire tenant
-    File.open("#{tenant_name}_works_data.json", 'w') do |file|
+    File.open("#{tenant_cname}_works_data.json", 'w') do |file|
       # Write the opening bracket of a JSON object
       file.puts "{"
 
@@ -61,7 +70,7 @@ def extract_work_metadata_and_files(tenant_name, work_types)
           puts "Warning: Work type #{work_type} is not defined. Skipping..."
         rescue StandardError => e
           # Log any other errors for the work type
-          puts "Error processing work type #{work_type} for tenant #{tenant_name}: #{e.message}"
+          puts "Error processing work type #{work_type} for tenant #{tenant_cname}: #{e.message}"
         end
       end
 
@@ -69,11 +78,11 @@ def extract_work_metadata_and_files(tenant_name, work_types)
       file.puts "}"
     end
 
-    puts "Finished extracting data for tenant: #{tenant_name}"
+    puts "Finished extracting data for tenant: #{tenant_cname}"
 
   rescue StandardError => e
     # Log any unexpected errors for the tenant
-    puts "Error processing tenant #{tenant_name}: #{e.message}"
+    puts "Error processing tenant #{tenant_cname}: #{e.message}"
   ensure
     # Reset to the default tenant to free up memory
     Apartment::Tenant.reset
@@ -109,11 +118,11 @@ if ARGV.length != 1
   exit 1
 end
 
-tenant_name = ARGV[0] # Get the tenant cname from command-line arguments
+tenant_cname = ARGV[0] # Get the tenant cname from command-line arguments
 
-puts "Starting extraction for tenant: #{tenant_name}"
+puts "Starting extraction for tenant cname: #{tenant_cname}"
 
-extract_work_metadata_and_files(tenant_name, WORK_TYPES)
+extract_work_metadata_and_files(tenant_cname, WORK_TYPES)
 
-puts "Completed extraction for tenant: #{tenant_name}"
+puts "Completed extraction for tenant cname: #{tenant_cname}"
 puts "======================================="
