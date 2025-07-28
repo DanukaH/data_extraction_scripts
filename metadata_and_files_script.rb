@@ -41,15 +41,45 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
               collections: work.members.select { |member| member.is_a?(Collection) }.map(&:attributes) # Fetch collections
             )
 
+            # Handle access controls for the work
+            if work.access_control_id.present?
+              begin
+                access_control = Hydra::AccessControl.find(work.access_control_id)
+                work_data[:access_control] = access_control.attributes
+                work_data[:access_control][:permissions] = access_control.permissions.map(&:attributes)
+                work_data.delete('access_control_id')
+              rescue => e
+                puts "Warning: Could not fetch access control for work #{work.id}: #{e.message}"
+              end
+            end
+
             # Extract file metadata, including missing fields
             file_data_list = work.file_sets.map do |file_set|
-              file_set.attributes.merge(
-                visibility: file_set.visibility, # Add file visibility
-                embargo: file_set.try(:embargo)&.attributes, # Fetch embargo details for file
-                lease: file_set.try(:lease)&.attributes,     # Fetch lease details for file
+              file_data = file_set.attributes.merge(
+                visibility: file_set.visibility,
+                embargo: file_set.try(:embargo)&.attributes,
+                lease: file_set.try(:lease)&.attributes,
+                file_size: file_set.original_file&.size || 0,
+                digest: extract_checksum_info(file_set),
                 original_file_metadata: file_set.original_file&.attributes&.except('id', 'created_at', 'updated_at') || {}
               )
+
+              # Handle access controls for the file set
+              if file_set.access_control_id.present?
+                begin
+                  file_access_control = Hydra::AccessControl.find(file_set.access_control_id)
+                  file_data[:access_control] = {
+                    permissions: file_access_control.permissions.map(&:attributes)
+                  }
+                  file_data.delete('access_control_id')
+                rescue => e
+                  puts "Warning: Could not fetch access control for file #{file_set.id}: #{e.message}"
+                end
+              end
+
+              file_data
             end
+
 
             # Integrate file data into work data
             work_data[:files] = file_data_list unless file_data_list.empty?
@@ -91,6 +121,30 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
     GC.start
   end
 end
+
+def extract_checksum_info(file_set)
+  begin
+    return {} if file_set.original_file.nil?
+
+    digest = file_set.original_file.digest
+    puts "Debug - Digest for #{file_set.id}: #{digest.inspect}" # Debug line
+
+    if digest.respond_to?(:first) && digest.first.present?
+      digest_parts = digest.first.to_s.split(':')
+      {
+        original: digest.first,
+        algorithm: digest_parts[0],
+        message: digest_parts[1]
+      }
+    else
+      {}
+    end
+  rescue StandardError => e
+    puts "Warning: Error extracting checksum for file_set #{file_set.id}: #{e.message}"
+    {}
+  end
+end
+
 
 # Define the list of work types
 WORK_TYPES = %w[
