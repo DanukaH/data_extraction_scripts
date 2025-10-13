@@ -20,7 +20,7 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
     # Open a file to write the extracted information for the entire tenant
     File.open("#{tenant_cname}_works_data.json", 'w') do |file|
       # Write the opening bracket of a JSON object
-      file.puts "{"
+      file.puts '{'
 
       first_work_type = true # Track if it's the first work type for proper JSON formatting
 
@@ -53,7 +53,7 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
                 work_data[:access_control] = access_control.attributes
                 work_data[:access_control][:permissions] = access_control.permissions.map(&:attributes)
                 work_data.delete('access_control_id')
-              rescue => e
+              rescue StandardError => e
                 puts "Warning: Could not fetch access control for work #{work.id}: #{e.message}"
               end
             end
@@ -87,7 +87,7 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
                     permissions: file_access_control.permissions.map(&:attributes)
                   }
                   file_data.delete('access_control_id')
-                rescue => e
+                rescue StandardError => e
                   puts "Warning: Could not fetch access control for file #{file_set.id}: #{e.message}"
                 end
               end
@@ -111,9 +111,9 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
           next if work_data_list.empty?
 
           # Write the work type and its data to the file
-          file.puts (first_work_type ? "" : ",") + "\"#{work_type}\": ["
-          file.puts work_data_list.map(&:to_json).join(",")
-          file.puts "]"
+          file.puts (first_work_type ? '' : ',') + "\"#{work_type}\": ["
+          file.puts work_data_list.map(&:to_json).join(',')
+          file.puts ']'
           first_work_type = false
 
         rescue NameError
@@ -126,7 +126,7 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
       end
 
       # Close the JSON object for the tenant
-      file.puts "}"
+      file.puts '}'
     end
 
     puts "Finished extracting data for tenant: #{tenant_cname}"
@@ -211,7 +211,7 @@ def serialize_embargo(resource)
 
   {
     id: try_send(emb, :id) || try_send(resource, :embargo_id),
-    type: "embargo",
+    type: 'embargo',
     release_date: release,                 # ISO8601 UTC
     visibility_during: during,             # e.g., "restricted"
     visibility_after: after,               # e.g., "open"
@@ -219,7 +219,7 @@ def serialize_embargo(resource)
     active: active,
     currently_applied_visibility: !!active_visibility
   }.compact
-rescue => e
+rescue StandardError => e
   puts "Warning: Could not serialize embargo for #{resource.try(:id)}: #{e.message}"
   nil
 end
@@ -256,7 +256,7 @@ def serialize_lease(resource)
 
   {
     id: try_send(lease, :id) || try_send(resource, :lease_id),
-    type: "lease",
+    type: 'lease',
     expiration_date: expiration,           # ISO8601 UTC
     visibility_during: during,             # e.g., "open"
     visibility_after: after,               # e.g., "restricted"
@@ -264,7 +264,7 @@ def serialize_lease(resource)
     active: active,
     currently_applied_visibility: !!active_visibility
   }.compact
-rescue => e
+rescue StandardError => e
   puts "Warning: Could not serialize lease for #{resource.try(:id)}: #{e.message}"
   nil
 end
@@ -276,6 +276,7 @@ end
 def blank_value?(v)
   return true if v.nil?
   return v.empty? if v.respond_to?(:empty?)
+
   false
 end
 
@@ -285,6 +286,7 @@ end
 
 def safe_iso8601(value)
   return nil if value.nil? || (value.respond_to?(:empty?) && value.empty?)
+
   t =
     if value.is_a?(Time) || value.is_a?(DateTime)
       value
@@ -296,7 +298,7 @@ def safe_iso8601(value)
       Time.parse(value.to_s)
     end
   t&.utc&.iso8601
-rescue
+rescue StandardError
   nil
 end
 
@@ -326,7 +328,7 @@ WORK_TYPES = %w[
 
 # Main execution logic
 if ARGV.length != 1
-  puts "Usage: ruby extract_metadata.rb <tenant_cname>"
+  puts 'Usage: ruby extract_metadata.rb <tenant_cname>'
   exit 1
 end
 
@@ -337,4 +339,4 @@ puts "Starting extraction for tenant cname: #{tenant_cname}"
 extract_work_metadata_and_files(tenant_cname, WORK_TYPES)
 
 puts "Completed extraction for tenant cname: #{tenant_cname}"
-puts "======================================="
+puts '======================================='
