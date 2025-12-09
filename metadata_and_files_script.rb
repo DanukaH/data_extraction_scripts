@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 # Define a method to extract work metadata and files for a specific tenant
-def extract_work_metadata_and_files(tenant_cname, work_types)
+def extract_work_metadata_and_files(tenant_cname, work_types, public_only: false)
   # Find the tenant by cname
   tenant = Account.find_by(cname: tenant_cname)
 
@@ -12,10 +12,30 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
 
   tenant_name = tenant.tenant # Get the actual tenant name from the account
   puts "Extracting work metadata and files for tenant: #{tenant_cname} (tenant: #{tenant_name})"
+  puts "Public only filter: #{public_only}"
 
   begin
     # Switch to the tenant's schema using the actual tenant name
     Apartment::Tenant.switch!(tenant_name)
+
+    # Filter work types to those actually available in this tenant
+    site = Site.instance || Site.first
+    available_works = Array(site&.available_works).map(&:to_s)
+    effective_work_types = work_types & available_works
+
+    puts "Available work types: #{available_works.inspect}"
+    puts "Effective work types to process: #{effective_work_types.inspect}"
+
+    if effective_work_types.empty?
+      puts "No matching work types to process. Exiting."
+      return
+    end
+
+    # Track duplicates and stats
+    total_solr_results = 0
+    total_unique_works = 0
+    total_duplicates = 0
+    duplicate_ids = []
 
     # Open a file to write the extracted information for the entire tenant
     File.open("#{tenant_cname}_works_data.json", 'w') do |file|
@@ -25,96 +45,188 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
       first_work_type = true # Track if it's the first work type for proper JSON formatting
 
       # Iterate through all the specified work types
-      work_types.each do |work_type|
+      effective_work_types.each do |work_type|
         begin
           # Get the model class for the current work type
           model_class = work_type.constantize
+          puts "Processing work type: #{work_type}"
 
-          # Collect data for the current work type
-          work_data_list = [] # Stores data for all works of this type
-          model_class.find_each do |work|
-            # Extract metadata and attached files for the work
-            embargo_block = serialize_embargo(work)
-            lease_block   = serialize_lease(work)
+          # Use Solr to retrieve IDs in batches to allow better memory management
+          batch_size = 200
+          start = 0
+          works_found_in_type = false
+          first_work_in_type = true
 
-            work_data = work.attributes.merge(
-              visibility: work.visibility,
-              embargo: embargo_block,
-              lease: lease_block,
-              admin: work.try(:admin_set)&.attributes, # Fetch admin set if available
-              workflow_status: work.try(:to_sipity_entity)&.workflow_state_name, # Include workflow status
-              collections: work.members.select { |member| member.is_a?(Collection) }.map(&:attributes) # Fetch collections
+          # Track processed IDs to avoid duplicates
+          processed_ids = Set.new
+
+          loop do
+            # Query Solr for IDs with optional visibility filter
+            # IMPORTANT: Add sort parameter for stable pagination to prevent duplicates
+            solr_query = "has_model_ssim:#{work_type}"
+            if public_only
+              solr_query += " AND visibility_ssi:open"
+            end
+
+            docs = ActiveFedora::SolrService.query(
+              solr_query,
+              rows: batch_size,
+              start: start,
+              fl: 'id',
+              sort: 'id asc'  # Stable sort prevents pagination duplicates
             )
 
-            # Handle access controls for the work
-            if work.access_control_id.present?
-              begin
-                access_control = Hydra::AccessControl.find(work.access_control_id)
-                work_data[:access_control] = access_control.attributes
-                work_data[:access_control][:permissions] = access_control.permissions.map(&:attributes)
-                work_data.delete('access_control_id')
-              rescue StandardError => e
-                puts "Warning: Could not fetch access control for work #{work.id}: #{e.message}"
+            break if docs.empty?
+
+            ids = docs.map { |doc| doc['id'] }
+            total_solr_results += ids.length
+
+            # Filter out already processed IDs (duplicates - safety net)
+            original_count = ids.length
+            ids = ids.reject do |id|
+              if processed_ids.include?(id)
+                duplicate_ids << id
+                total_duplicates += 1
+                puts "Warning: Duplicate ID found in Solr: #{id}"
+                true
+              else
+                processed_ids.add(id)
+                false
               end
             end
 
-            # Compact view of effective access to help target system decisions
-            work_data[:access_effective] = {
-              visibility: work.visibility,
-              under_embargo: embargo_block ? embargo_block[:active] : false,
-              under_lease: lease_block ? lease_block[:active] : false
-            }
+            dedupe_count = original_count - ids.length
+            if dedupe_count > 0
+              puts "  Filtered #{dedupe_count} duplicate(s) in this batch"
+            end
 
-            # Extract file metadata, including missing fields
-            file_data_list = work.file_sets.map do |file_set|
-              fs_embargo = serialize_embargo(file_set)
-              fs_lease   = serialize_lease(file_set)
+            ids.each do |id|
+              total_unique_works += 1
 
-              file_data = file_set.attributes.merge(
-                visibility: file_set.visibility,
-                embargo: fs_embargo,
-                lease: fs_lease,
-                file_size: file_set.original_file&.size || 0,
-                digest: extract_checksum_info(file_set),
-                original_file_metadata: file_set.original_file&.attributes&.except('id', 'created_at', 'updated_at') || {}
+              begin
+                work = model_class.find(id)
+              rescue ActiveFedora::ObjectNotFoundError
+                puts "Warning: Work #{id} found in Solr but not in Fedora. Skipping."
+                next
+              rescue StandardError => e
+                puts "Warning: Error loading work #{id}: #{e.message}. Skipping."
+                next
+              end
+
+              # Extract metadata and attached files for the work
+              embargo_block = serialize_embargo(work)
+              lease_block   = serialize_lease(work)
+
+              work_data = work.attributes.merge(
+                visibility: work.visibility,
+                embargo: embargo_block,
+                lease: lease_block,
+                admin: work.try(:admin_set)&.attributes, # Fetch admin set if available
+                workflow_status: work.try(:to_sipity_entity)&.workflow_state_name, # Include workflow status
+                collections: work.members.select { |member| member.is_a?(Collection) }.map(&:attributes) # Fetch collections
               )
 
-              # Handle access controls for the file set
-              if file_set.access_control_id.present?
+              # Handle access controls for the work
+              if work.access_control_id.present?
                 begin
-                  file_access_control = Hydra::AccessControl.find(file_set.access_control_id)
-                  file_data[:access_control] = {
-                    permissions: file_access_control.permissions.map(&:attributes)
-                  }
-                  file_data.delete('access_control_id')
+                  access_control = Hydra::AccessControl.find(work.access_control_id)
+                  work_data[:access_control] = access_control.attributes
+                  work_data[:access_control][:permissions] = access_control.permissions.map(&:attributes)
+                  work_data.delete('access_control_id')
                 rescue StandardError => e
-                  puts "Warning: Could not fetch access control for file #{file_set.id}: #{e.message}"
+                  puts "Warning: Could not fetch access control for work #{work.id}: #{e.message}"
                 end
               end
 
-              # Compact view for file_set
-              file_data[:access_effective] = {
-                visibility: file_set.visibility,
-                under_embargo: fs_embargo ? fs_embargo[:active] : false,
-                under_lease: fs_lease ? fs_lease[:active] : false
+              # Compact view of effective access to help target system decisions
+              work_data[:access_effective] = {
+                visibility: work.visibility,
+                under_embargo: embargo_block ? embargo_block[:active] : false,
+                under_lease: lease_block ? lease_block[:active] : false
               }
 
-              file_data
+              # Extract file metadata, including missing fields
+              file_data_list = work.file_sets.map do |file_set|
+                fs_embargo = serialize_embargo(file_set)
+                fs_lease   = serialize_lease(file_set)
+
+                file_data = file_set.attributes.merge(
+                  visibility: file_set.visibility,
+                  embargo: fs_embargo,
+                  lease: fs_lease,
+                  file_size: file_set.original_file&.size || 0,
+                  digest: extract_checksum_info(file_set),
+                  original_file_metadata: file_set.original_file&.attributes&.except('id', 'created_at', 'updated_at') || {}
+                )
+
+                # Handle access controls for the file set
+                if file_set.access_control_id.present?
+                  begin
+                    file_access_control = Hydra::AccessControl.find(file_set.access_control_id)
+                    file_data[:access_control] = {
+                      permissions: file_access_control.permissions.map(&:attributes)
+                    }
+                    file_data.delete('access_control_id')
+                  rescue StandardError => e
+                    puts "Warning: Could not fetch access control for file #{file_set.id}: #{e.message}"
+                  end
+                end
+
+                # Compact view for file_set
+                file_data[:access_effective] = {
+                  visibility: file_set.visibility,
+                  under_embargo: fs_embargo ? fs_embargo[:active] : false,
+                  under_lease: fs_lease ? fs_lease[:active] : false
+                }
+
+                file_data
+              end
+
+              # Integrate file data into work data
+              work_data[:files] = file_data_list unless file_data_list.empty?
+
+              # === Stream JSON writing ===
+
+              if first_work_in_type
+                # If this is the first work for this type, we need to set up the JSON key
+
+                # If this is NOT the very first work type in the file, add a comma to separate types
+                file.write(",\n") unless first_work_type
+
+                # Write key and start of array
+                file.write("\"#{work_type}\": [")
+
+                # Mark flags
+                first_work_type = false
+                first_work_in_type = false
+                works_found_in_type = true
+              else
+                # If not the first work in this type, add a comma to separate works
+                file.write(",")
+              end
+
+              # Write the work JSON
+              file.write(work_data.to_json)
+
+              # Help GC
+              work = nil
+              work_data = nil
             end
 
-            # Integrate file data into work data
-            work_data[:files] = file_data_list unless file_data_list.empty?
-            work_data_list << work_data
+            # Move to next batch
+            start += batch_size
+
+            # Explicitly run GC after every batch to prevent memory creep
+            GC.start
           end
 
-          # Skip this work type if no works were found
-          next if work_data_list.empty?
+          # Close the array for this work type if we wrote any works
+          if works_found_in_type
+            file.write("]")
+          end
 
-          # Write the work type and its data to the file
-          file.puts (first_work_type ? '' : ',') + "\"#{work_type}\": ["
-          file.puts work_data_list.map(&:to_json).join(',')
-          file.puts ']'
-          first_work_type = false
+          # GC after type
+          GC.start
 
         rescue NameError
           # If the class does not exist or is not defined, warn and skip the work type
@@ -122,18 +234,31 @@ def extract_work_metadata_and_files(tenant_cname, work_types)
         rescue StandardError => e
           # Log any other errors for the work type
           puts "Error processing work type #{work_type} for tenant #{tenant_cname}: #{e.message}"
+          puts e.backtrace.first(5)
         end
       end
 
       # Close the JSON object for the tenant
-      file.puts '}'
+      file.puts "\n}"
     end
 
+    puts "\n======================================="
+    puts "Extraction Summary:"
+    puts "  Total Solr results: #{total_solr_results}"
+    puts "  Unique works processed: #{total_unique_works}"
+    puts "  Duplicate IDs found: #{total_duplicates}"
+    if duplicate_ids.any?
+      puts "\nDuplicate IDs (first 20):"
+      duplicate_ids.uniq.first(20).each { |id| puts "  - #{id}" }
+      puts "  ... and #{duplicate_ids.uniq.length - 20} more" if duplicate_ids.uniq.length > 20
+    end
+    puts "======================================="
     puts "Finished extracting data for tenant: #{tenant_cname}"
 
   rescue StandardError => e
     # Log any unexpected errors for the tenant
     puts "Error processing tenant #{tenant_cname}: #{e.message}"
+    puts e.backtrace.first(10)
   ensure
     # Reset to the default tenant to free up memory
     Apartment::Tenant.reset
@@ -157,8 +282,8 @@ def extract_checksum_info(file_set)
       message = nil
 
       if parts.length >= 3 && parts[0] == 'urn'
-        algorithm = parts[0]      # "urn"
-        message   = parts[1]      # "sha1"
+        algorithm = parts[1]      # "sha1"
+        message   = parts[2]      # "abcdef..."
       elsif parts.length >= 2
         algorithm = parts[0]      # "sha1"
         message   = parts[1]      # "abcdef..."
@@ -327,16 +452,17 @@ WORK_TYPES = %w[
 ].freeze
 
 # Main execution logic
-if ARGV.length != 1
-  puts 'Usage: ruby extract_metadata.rb <tenant_cname>'
+if ARGV.length < 1 || ARGV.length > 2
+  puts 'Usage: ruby extract_metadata.rb <tenant_cname> [--public-only]'
   exit 1
 end
 
 tenant_cname = ARGV[0] # Get the tenant cname from command-line arguments
+public_only = ARGV.include?('--public-only')
 
 puts "Starting extraction for tenant cname: #{tenant_cname}"
 
-extract_work_metadata_and_files(tenant_cname, WORK_TYPES)
+extract_work_metadata_and_files(tenant_cname, WORK_TYPES, public_only: public_only)
 
 puts "Completed extraction for tenant cname: #{tenant_cname}"
 puts '======================================='
